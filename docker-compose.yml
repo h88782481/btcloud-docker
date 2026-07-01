@@ -1,0 +1,52 @@
+name: btcloud
+
+# 架构说明:
+#   浏览器 → 宝塔 Nginx (80/443, SSL 由宝塔处理)
+#          → 反向代理 → 127.0.0.1:8080 (本 Docker Nginx)
+#          → PHP-FPM 容器
+#          → host.docker.internal → 宝塔 MySQL
+#
+# 优点:
+#   1. 宝塔 Nginx 只做反代，不读文件，不受 /root 权限限制
+#   2. 项目可放在任意目录（./data 直接挂到容器内 /var/www/html）
+#   3. 无需 SCRIPT_FILENAME 同路径技巧
+#
+# 目录结构:
+#   项目文件夹/
+#   ├── docker-compose.yml
+#   ├── Dockerfile
+#   ├── nginx.conf
+#   ├── data/               (btcloud 源码解压位置)
+#   │   └── public/index.php
+#   └── logs/
+
+services:
+  # Docker 内部 Nginx（处理静态资源 + 转发 PHP）
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: btcloud-nginx
+    restart: unless-stopped
+    ports:
+      # 只监听 127.0.0.1，由宝塔 Nginx 反代
+      - "127.0.0.1:${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./data:/var/www/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - php
+
+  # PHP-FPM
+  php:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: btcloud-php:8.2
+    container_name: btcloud-php
+    restart: unless-stopped
+    volumes:
+      - ./data:/var/www/html
+      - ./logs/php:/var/log/php
+    extra_hosts:
+      # 让容器可以通过 host.docker.internal 访问宿主机（连宝塔的 MySQL）
+      - "host.docker.internal:host-gateway"

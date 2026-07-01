@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.idea
+.vscode
+data
+logs
+*.md
+!README.md
+*.sql
+*.zip
+*.tar.gz
