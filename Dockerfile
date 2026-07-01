@@ -25,7 +25,9 @@ RUN apk add --no-cache \
         libxml2-dev \
         tzdata \
         bash \
-        shadow
+        shadow \
+        grep \
+        sed
 
 # 设置时区
 ENV TZ=Asia/Shanghai
