@@ -1,12 +1,6 @@
-.git
-.gitignore
-.env
-.idea
-.vscode
-data
-logs
-*.md
-!README.md
-*.sql
-*.zip
-*.tar.gz
+# 构建上下文只需要 Dockerfile 中 COPY 的这几个文件
+*
+!docker-entrypoint.sh
+!start.sh
+!update-btcloud.sh
+!nginx.conf

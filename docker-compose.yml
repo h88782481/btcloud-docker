@@ -2,51 +2,60 @@ name: btcloud
 
 # 架构说明:
 #   浏览器 → 宝塔 Nginx (80/443, SSL 由宝塔处理)
-#          → 反向代理 → 127.0.0.1:8080 (本 Docker Nginx)
-#          → PHP-FPM 容器
-#          → host.docker.internal → 宝塔 MySQL
+#          → 反向代理 → 127.0.0.1:8080 (本容器: Nginx + PHP-FPM + MariaDB)
 #
 # 优点:
 #   1. 宝塔 Nginx 只做反代，不读文件，不受 /root 权限限制
-#   2. 项目可放在任意目录（./data 直接挂到容器内 /var/www/html）
-#   3. 无需 SCRIPT_FILENAME 同路径技巧
+#   2. 数据全部落在 ./data（btcloud 源码 + MySQL 数据），换服务器整个目录打包带走即可
+#   3. 三个进程同容器（start.sh 监管），任一进程退出容器会自动重启
 #
 # 目录结构:
 #   项目文件夹/
 #   ├── docker-compose.yml
 #   ├── Dockerfile
 #   ├── nginx.conf
-#   ├── data/               (btcloud 源码解压位置)
-#   │   └── public/index.php
+#   ├── start.sh
+#   ├── update-btcloud.sh   (容器内自动更新脚本，打进镜像)
+#   ├── data/
+#   │   ├── btcloud/        (btcloud 源码解压位置)
+#   │   │   └── public/index.php
+#   │   └── mysql/          (MariaDB 数据目录，首次启动自动初始化)
 #   └── logs/
 
 services:
-  # Docker 内部 Nginx（处理静态资源 + 转发 PHP）
-  nginx:
-    image: nginx:1.27-alpine
-    container_name: btcloud-nginx
-    restart: unless-stopped
-    ports:
-      # 只监听 127.0.0.1，由宝塔 Nginx 反代
-      - "127.0.0.1:${HTTP_PORT:-8080}:80"
-    volumes:
-      - ./data:/var/www/html:ro
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./logs/nginx:/var/log/nginx
-    depends_on:
-      - php
-
-  # PHP-FPM
-  php:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-    image: btcloud-php:8.2
-    container_name: btcloud-php
+    image: btcloud-app:8.3
+    container_name: btcloud
     restart: unless-stopped
+    # tini 作为 PID 1，负责信号转发和僵尸进程回收
+    init: true
+    # 给 MariaDB 留足优雅关闭时间，避免停容器时被强杀损坏数据
+    stop_grace_period: 1m
+    environment:
+      # 站点对外域名，升级后执行官方 convert.sh 替换安装包里的域名时用（必须 http:// 或 https:// 开头）
+      BTCLOUD_DOMAIN: "https://bt.example.com"
+      # 是否自动更新 btcloud: true = 定时检查 GitHub 最新 Release，发现新版自动下载，
+      # 按官方方式覆盖除 data 外的全部文件，然后自动执行域名替换
+      # 注意: 改成 true 前请先把上面的域名改成你自己的
+      AUTO_UPDATE: "false"
+      # 检查新版本的间隔（秒），默认 86400 = 24 小时
+      UPDATE_INTERVAL: "86400"
+      # 内置 MariaDB 的库名/用户/密码（首次启动自动创建，改密码后重启容器即生效）
+      # 安装向导里: 数据库主机填 127.0.0.1，其余按这里填
+      MYSQL_DATABASE: "btcloud"
+      MYSQL_USER: "btcloud"
+      MYSQL_PASSWORD: "ChangeMe_btcloud"
+      # 启动时权限修复策略: auto(默认，检测到属主不对才修) / always / never
+      # FIX_PERMS: "auto"
+    ports:
+      # 只监听 127.0.0.1，由宝塔 Nginx 反代；端口冲突直接改这里（如 8081:80）
+      - "127.0.0.1:8080:80"
     volumes:
-      - ./data:/var/www/html
-      - ./logs/php:/var/log/php
-    extra_hosts:
-      # 让容器可以通过 host.docker.internal 访问宿主机（连宝塔的 MySQL）
-      - "host.docker.internal:host-gateway"
+      - ./data/btcloud:/var/www/html
+      - ./data/mysql:/var/lib/mysql
+      # 站点配置直接挂载，修改后 docker compose restart app 即可生效
+      - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
+      - ./logs/nginx:/var/log/nginx

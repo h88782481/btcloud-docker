@@ -1,0 +1,7 @@
+# 以下文件会进入 Linux 容器执行/解析，必须保持 LF 换行（在 Windows 上开发时防止被转成 CRLF）
+*.sh text eol=lf
+Dockerfile text eol=lf
+nginx.conf text eol=lf
+docker-compose.yml text eol=lf
+.dockerignore text eol=lf
+.gitattributes text eol=lf
