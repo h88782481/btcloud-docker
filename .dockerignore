@@ -2,5 +2,4 @@
 *
 !docker-entrypoint.sh
 !start.sh
-!update-btcloud.sh
 !nginx.conf

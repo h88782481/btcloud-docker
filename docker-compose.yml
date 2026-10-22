@@ -1,61 +1,34 @@
 name: btcloud
 
-# 架构说明:
-#   浏览器 → 宝塔 Nginx (80/443, SSL 由宝塔处理)
-#          → 反向代理 → 127.0.0.1:8080 (本容器: Nginx + PHP-FPM + MariaDB)
-#
-# 优点:
-#   1. 宝塔 Nginx 只做反代，不读文件，不受 /root 权限限制
-#   2. 数据全部落在 ./data（btcloud 源码 + MySQL 数据），换服务器整个目录打包带走即可
-#   3. 三个进程同容器（start.sh 监管），任一进程退出容器会自动重启
-#
-# 目录结构:
-#   项目文件夹/
-#   ├── docker-compose.yml
-#   ├── Dockerfile
-#   ├── nginx.conf
-#   ├── start.sh
-#   ├── update-btcloud.sh   (容器内自动更新脚本，打进镜像)
-#   ├── data/
-#   │   ├── btcloud/        (btcloud 源码解压位置)
-#   │   │   └── public/index.php
-#   │   └── mysql/          (MariaDB 数据目录，首次启动自动初始化)
-#   └── logs/
-
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    image: btcloud-app:8.3
+      pull: true
+      args:
+        # 必填：flucont/btcloud 的完整 Release tag，按上游原样填写。
+        BTCLOUD_RELEASE_TAG: ""
+    image: btcloud-app:local
     container_name: btcloud
     restart: unless-stopped
-    # tini 作为 PID 1，负责信号转发和僵尸进程回收
     init: true
-    # 给 MariaDB 留足优雅关闭时间，避免停容器时被强杀损坏数据
-    stop_grace_period: 1m
+    # 请求最多执行 600 秒，再给数据库留出关闭时间。
+    stop_grace_period: 11m
     environment:
-      # 站点对外域名，升级后执行官方 convert.sh 替换安装包里的域名时用（必须 http:// 或 https:// 开头）
-      BTCLOUD_DOMAIN: "https://bt.example.com"
-      # 是否自动更新 btcloud: true = 定时检查 GitHub 最新 Release，发现新版自动下载，
-      # 按官方方式覆盖除 data 外的全部文件，然后自动执行域名替换
-      # 注意: 改成 true 前请先把上面的域名改成你自己的
-      AUTO_UPDATE: "false"
-      # 检查新版本的间隔（秒），默认 86400 = 24 小时
-      UPDATE_INTERVAL: "86400"
-      # 内置 MariaDB 的库名/用户/密码（首次启动自动创建，改密码后重启容器即生效）
-      # 安装向导里: 数据库主机填 127.0.0.1，其余按这里填
+      # 必填：http(s)://域名，可带端口，不带路径或末尾斜杠。
+      BTCLOUD_DOMAIN: ""
       MYSQL_DATABASE: "btcloud"
       MYSQL_USER: "btcloud"
-      MYSQL_PASSWORD: "ChangeMe_btcloud"
-      # 启动时权限修复策略: auto(默认，检测到属主不对才修) / always / never
-      # FIX_PERMS: "auto"
+      # 必填；密码中的 $ 在 Compose 中写成 $$。
+      MYSQL_PASSWORD: ""
+      # 完成后台宝塔接口配置后开启，自动同步插件列表并增量下载插件包。
+      PLUGIN_SYNC_ENABLED: "false"
+      # 每轮执行结束后的等待时间，单位秒；86400 = 24 小时。
+      PLUGIN_SYNC_INTERVAL: "86400"
     ports:
-      # 只监听 127.0.0.1，由宝塔 Nginx 反代；端口冲突直接改这里（如 8081:80）
       - "127.0.0.1:8080:80"
     volumes:
       - ./data/btcloud:/var/www/html
       - ./data/mysql:/var/lib/mysql
-      # 站点配置直接挂载，修改后 docker compose restart app 即可生效
       - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
-      - ./logs/nginx:/var/log/nginx

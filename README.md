@@ -1,152 +1,79 @@
-# btcloud Docker 部署（宝塔 Nginx 反代方案）
+# btcloud Docker 部署
 
-基于 [flucont/btcloud](https://github.com/flucont/btcloud) 的 Docker 部署方案。
+为 [flucont/btcloud](https://github.com/flucont/btcloud) 提供单容器部署：宝塔 Nginx 负责域名和 HTTPS，容器运行 Nginx、PHP-FPM、MariaDB。
 
-## 架构
+在 `docker-compose.yml` 的 `build.args.BTCLOUD_RELEASE_TAG` 中指定 btcloud 版本，执行 `docker compose up -d --build` 部署或更新。
 
-```
-浏览器 ──> 宝塔 Nginx (80/443, SSL 由宝塔处理)
-              │
-              │  反向代理 (HTTP)
-              ▼
-       127.0.0.1:8080 ──> Docker 容器
-                          ├── Nginx      (静态资源)
-                          ├── PHP-FPM    (应用)
-                          └── MariaDB    (数据库，数据落在 ./data/mysql)
-```
+## 目录与请求链路
 
-**特点**：
-- 宝塔 Nginx 只做**反向代理**（不读项目文件），负责域名/SSL/防火墙
-- Nginx、PHP-FPM、MariaDB 跑在**同一个容器**里（`start.sh` 监管，任一进程退出容器自动重启）
-- 数据库**内置**（MariaDB，兼容 MySQL），不依赖宝塔 MySQL，仅监听容器内 `127.0.0.1`
-- **全部数据落在 `./data`**：`data/btcloud` 是源码和插件包，`data/mysql` 是数据库——
-  换服务器时整个 `./data` 打包带走即可
-- **项目可放任意目录**（`/root/`、`/opt/`、`/www/wwwroot/` 都行）
+浏览器 → 宝塔 Nginx（80/443）→ 宿主机 `127.0.0.1:8080` → 容器 Nginx → PHP-FPM → 容器内 MariaDB。
 
-## 目录结构
-
-```
-/root/btcloud/                    ← 项目目录（可任意位置）
-├── Dockerfile                    # Nginx + PHP-FPM + MariaDB 单容器镜像
-├── docker-compose.yml            # 编排（只有一个 app 服务）
-├── docker-entrypoint.sh          # 启动时修权限 + 初始化 MariaDB
-├── start.sh                      # 容器内监管三个进程
-├── update-btcloud.sh             # 自动更新脚本（打进镜像，容器内执行）
-├── nginx.conf                    # 容器内 Nginx 站点配置
-├── README.md
-├── btcloud_3.8.zip               # 你下载的 Release 包
-├── data/                         # ★ 全部数据，备份/迁移打包这个目录即可
-│   ├── btcloud/                  #   btcloud 源码（Release 包解压到这）
-│   │   ├── public/index.php
-│   │   └── data/                 #   btcloud 内部数据（插件包、密钥）
-│   └── mysql/                    #   MariaDB 数据目录（首次启动自动初始化）
-└── logs/                         # 日志
-    └── nginx/
+```text
+项目目录/
+├── Dockerfile
+├── docker-compose.yml
+├── docker-entrypoint.sh
+├── start.sh
+├── nginx.conf
+├── .dockerignore
+└── data/
+    ├── btcloud/              # 应用源码，首次启动从镜像部署
+    │   ├── .env             # 应用数据库配置，升级时保留
+    │   └── data/            # 应用内部数据，升级时保留
+    │       └── .release-tag # 上次成功部署的 Release tag
+    └── mysql/               # MariaDB 数据目录
 ```
 
-## PHP 扩展
+源码包保存在镜像的 `/opt/btcloud`，实际运行目录是挂载的 `/var/www/html`。数据库只监听容器回环地址，不映射 3306 端口。
 
-镜像额外编译安装：`pdo_mysql`（数据库）、`zip`（ZipArchive）、`gd`（登录验证码）。
-`mbstring`、`fileinfo`、`curl`、`opcache` 等基础镜像已自带，无需重复安装。
+## 首次部署
 
----
+### 1. 准备文件与配置
 
-## 部署步骤
+将本项目文件放到服务器目录，例如 `/root/btcloud`。无需手动下载或解压 btcloud 安装包。
 
-### 1. 上传项目文件到服务器
+修改 `docker-compose.yml` 的三个必填项：
 
-把 `Dockerfile`、`docker-compose.yml`、`docker-entrypoint.sh`、`start.sh`、`update-btcloud.sh`、`nginx.conf` 上传到服务器任意目录，如 `/root/btcloud/`。
+- `build.args.BTCLOUD_RELEASE_TAG`：从 [上游 Releases](https://github.com/flucont/btcloud/releases) 选择版本，原样填写 Release tag。
+- `environment.BTCLOUD_DOMAIN`：实际站点地址，例如 `https://bt.your-domain.net`。可带端口，不能带路径或末尾斜杠。
+- `environment.MYSQL_PASSWORD`：数据库密码。Compose 中的 `$` 需要写成 `$$`；包含反斜杠时建议用 YAML 单引号包裹。
 
-### 2. 下载并解压 btcloud Release 包
+`MYSQL_DATABASE` 和 `MYSQL_USER` 在 Compose 中设置为 `btcloud`，可以修改。库名、用户名只允许字母、数字、下划线，首字符不能是数字。
 
-从 [Releases 页面](https://github.com/flucont/btcloud/releases) 下载最新的 zip（如 `btcloud_3.8.zip`），解压到 `data/btcloud`：
-
-```bash
-cd /root/btcloud
-mkdir -p data/btcloud
-unzip btcloud_3.8.zip -d data/btcloud
-
-# 检查是否多套了一层目录
-ls data/btcloud
-# 如果看到 btcloud_3.8 之类的目录，执行：
-# mv data/btcloud/btcloud_3.8/* data/btcloud/ && rm -rf data/btcloud/btcloud_3.8
-
-# 最终必须存在
-ls data/btcloud/public/index.php
-```
-
-### 3. 配置 docker-compose.yml
-
-打开 `docker-compose.yml`，改 `environment` 里的两处：
-
-```yaml
-environment:
-  BTCLOUD_DOMAIN: "https://bt.example.com"   # 改成你的站点域名
-  MYSQL_PASSWORD: "ChangeMe_btcloud"         # 改成强密码（数据库密码）
-```
-
-数据库的库名/用户名默认都是 `btcloud`，一般不用动。首次启动会自动建库建用户；
-以后改了 `MYSQL_PASSWORD` 重启容器即自动同步。
-
-### 4. 启动 Docker 容器
+### 2. 构建并启动
 
 ```bash
 cd /root/btcloud
 docker compose up -d --build
-
-# 查看状态
-docker compose ps
-# 应看到 btcloud 容器是 Up (running)
-
-# 看日志（含 MariaDB 初始化过程）
-docker compose logs -f
+docker compose logs -f app
 ```
 
-测试内部 Nginx 是否正常：
+构建时通过 GitHub API 查询指定 tag，下载该 Release 中唯一的 ZIP 安装包。ZIP 根目录必须直接包含 `think`、`public/index.php`、`app/script/convert.sh` 和 `data/`。下载、解压或结构校验失败会终止构建。
 
-```bash
-curl -I http://127.0.0.1:8080
-# 应返回 200 或 302（重定向到安装页面）
-```
+启动时依次执行：
 
-### 5. 在宝塔面板新建反代站点
+1. 校验配置。
+2. 首次部署或 tag 改变时，从镜像覆盖源码，保留已有 `data/` 和 `.env`，执行官方域名替换脚本。
+3. 修复不符合要求的属主和权限，保留文件执行位，限制 `.env` 权限为 `600`。
+4. 首次初始化 MariaDB 数据目录，启动数据库并等待连接可用，执行建库、建用户及同步密码的 SQL。
+5. 启动 PHP-FPM 和 Nginx。
 
-**网站 → 添加站点**：
+SQL 初始化失败不会启动 Web 服务。任一受管进程退出时，其他进程会关闭，容器由 Compose 的 `restart: unless-stopped` 策略重启。配置错误应先停止容器并修正，避免反复启动。
 
-- 域名：你的域名
-- 根目录：随便填一个（比如 `/www/wwwroot/btcloud-proxy`），反正不会用到
-- PHP 版本：选 **纯静态**
-- 数据库：不创建
-- FTP：不创建
+### 3. 配置宝塔反代
 
-创建后：
+宝塔创建网站，PHP 版本选择“纯静态”，不创建数据库或 FTP。反向代理目标设为 `http://127.0.0.1:8080`，发送域名设为 `$host`，HTTPS 证书由宝塔管理。
 
-**网站 → 你的站点 → 设置 → 反向代理 → 添加反向代理**：
-
-| 项目 | 值 |
-|---|---|
-| 代理名称 | `btcloud` |
-| 目标 URL | `http://127.0.0.1:8080` |
-| 发送域名 | `$host` |
-
-**⚠️ 关键**：勾选 **"添加反代信息" / "启用反代"**。
-
-或者直接改配置文件 → **设置 → 配置文件**，替换 `server { ... }` 为：
+反代配置示例：
 
 ```nginx
 server {
     listen 80;
-    server_name 你的域名;
+    server_name bt.your-domain.net;
 
-    # SSL 相关（宝塔申请证书后自动加，先不管）
-
-    # 大文件上传/超时
-    client_max_body_size 1024M;
+    client_max_body_size 1056M;
     client_body_timeout 600s;
     send_timeout 600s;
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-    proxy_connect_timeout 60s;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -156,274 +83,127 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
         proxy_buffering off;
         proxy_request_buffering off;
     }
-
-    access_log  /www/wwwlogs/btcloud.log;
-    error_log   /www/wwwlogs/btcloud.error.log;
 }
 ```
 
-保存后宝塔自动 reload。
+### 4. 完成应用安装
 
-### 6. 访问安装向导
+访问站点，在安装向导中填写：
 
-浏览器打开 `http://你的域名`，会跳到安装页面：
+- 数据库主机：`127.0.0.1`，端口：`3306`。
+- 数据库名、用户名、密码：与 Compose 的 `MYSQL_*` 配置一致。
 
-| 项目 | 值 |
-|---|---|
-| **数据库主机** | `127.0.0.1` |
-| 数据库端口 | `3306` |
-| 数据库名 | `btcloud`（compose 里 `MYSQL_DATABASE` 的值） |
-| 数据库用户 | `btcloud`（compose 里 `MYSQL_USER` 的值） |
-| 数据库密码 | compose 里 `MYSQL_PASSWORD` 设置的密码 |
+数据库主机使用 TCP 地址 `127.0.0.1`。容器创建数据库和账户，业务表由 btcloud 安装向导创建。
 
-> 数据库主机填 `127.0.0.1`，**不要填 `localhost`**（localhost 会走 socket 文件，路径对不上）。
+首次部署已执行域名替换。之后在后台配置宝塔面板接口，并根据界面提示安装专用插件。
 
-### 7. 后续配置
+## 定时同步插件
 
-按 btcloud 官方 README：
-- 后台 → **批量替换工具** → 执行显示的命令
-- 后台 → **系统基本设置** → 配置宝塔面板接口
-- 后台 → **定时任务设置** → 获取最新插件列表
+默认关闭。完成应用安装和宝塔面板接口配置后，修改 Compose 中的设置：
 
-### 8. 开启 HTTPS（推荐）
+```yaml
+PLUGIN_SYNC_ENABLED: "true"
+PLUGIN_SYNC_INTERVAL: "86400"
+```
 
-宝塔面板 → 站点 → SSL → Let's Encrypt / 上传证书。宝塔会自动改 Nginx 配置加 SSL。
+执行 `docker compose up -d --build` 应用配置。容器启动后立即执行一次 `php think updateall`，获取插件列表并增量下载插件包；每轮命令结束后等待 `PLUGIN_SYNC_INTERVAL` 秒再执行，`86400` 表示 24 小时。
 
----
+同步以 `www-data` 身份运行，接口和下载范围使用后台保存的设置。每轮串行执行，输出可通过 `docker compose logs -f app` 查看。命令以非零状态退出时，按现有进程监管策略重启容器。
 
-## 常用命令
+将 `PLUGIN_SYNC_ENABLED` 改回 `"false"`，执行 `docker compose up -d` 即可关闭。仅修改这些环境变量时也可以直接使用 `docker compose up -d`。
+
+## 更新 btcloud
+
+先备份，然后修改 Compose 中的 `BTCLOUD_RELEASE_TAG`，执行：
 
 ```bash
-cd /root/btcloud
-
-# 启动 / 停止 / 重启
-docker compose up -d
-docker compose down
-docker compose restart app
-
-# 日志（php-fpm 和 MariaDB 输出到容器日志；nginx 访问/错误日志在 ./logs/nginx/）
+docker compose up -d --build
 docker compose logs -f app
-tail -f logs/nginx/btcloud_access.log
-
-# 进入容器
-docker compose exec app sh
-
-# 进入 MariaDB（root 在容器内免密）
-docker compose exec app mariadb -u root btcloud
-
-# 修改了 Dockerfile 后重建
-docker compose build --no-cache && docker compose up -d
-
-# 修改 nginx.conf 后重启即可生效（无需 rebuild）
-docker compose restart app
-
-# 修权限：重启即可，entrypoint 会自动检测并修复
-docker compose restart app
 ```
 
-> 权限修复行为可通过 app 服务的环境变量 `FIX_PERMS` 控制：
-> `auto`（默认，检测到属主不对才修复）/ `always`（每次启动强制修复）/ `never`（跳过）。
+下载和构建发生在替换运行容器之前，构建失败不会修改正在运行的源码。新容器启动时才同步新版本，此时 Web 服务尚未启动；完成后由全新的 PHP-FPM 进程加载代码。
 
-## 资源占用（1C1G 服务器够用）
+同步遵循上游的覆盖升级方式，不删除旧版中存在但新版未包含的文件。应用内部 `data/`、已有 `.env` 和数据库数据保留；其他源码可能被覆盖。没有自动执行数据库迁移或同步插件列表，具体版本的额外操作以该 Release 说明为准。
 
-镜像默认参数已按低配服务器调优：
+tag 与 `data/btcloud/data/.release-tag` 相同时，启动不覆盖源码。首次接入本方案的旧部署如果没有版本标记，会按配置的 tag 部署一次，因此接入前也应备份。
 
-| 组件 | 配置 | 说明 |
-|---|---|---|
-| MariaDB | `innodb_buffer_pool_size=64M`、`performance_schema=OFF` | btcloud 的库只有几 MB，足够 |
-| php-fpm | `pm=ondemand`，最多 4 个 worker，空闲 30s 回收 | 没请求时几乎不占内存 |
-| PHP | `memory_limit=256M`（单请求上限） | 上传/下载走磁盘流式处理，够用 |
-| OPcache | 64M | 应用代码量小 |
+修改 `BTCLOUD_DOMAIN` 不会自动重写已部署的同版本源码及已有插件中的旧域名。更换域名时按应用后台的批量替换流程处理，并同步 Compose 配置，供后续版本部署使用。
 
-空闲时整个容器常驻内存大约 **150~250MB**，1C1G 跑没有压力。两个建议：
+### 部署中断
+
+同步源码前会创建 `data/btcloud/.deployment-in-progress`，只有文件复制、域名替换和版本标记写入都成功后才删除。
+
+如果复制或替换失败，启动直接退出；后续启动发现标记仍在时会报错停止，不自动再次覆盖。先执行 `docker compose stop`，根据日志处理原因，并恢复升级前完整的 `data` 备份及对应配置后再启动。不要仅删除这个标记让未完成部署的源码对外提供服务。
+
+仅改回旧 tag 不能回滚数据库结构或应用数据。降级需要恢复与旧版本匹配的备份，并确认 MariaDB 版本兼容。
+
+## 运行环境版本
+
+基础镜像使用 `php:8.3-fpm-alpine`，PHP 保持在 8.3 系列，跟随上游更新补丁版本。Alpine 及其软件包版本随该镜像标签更新。
+
+Compose 的 `build.pull: true` 会在构建时检查并拉取该标签的最新镜像；镜像未变化时复用本地已有层。
+
+Docker 仍会复用未失效的构建层。如果需要重新安装软件源中的最新包，可以执行：
 
 ```bash
-# 1G 内存的机器建议开 1~2G swap 兜底（已有 swap 可跳过）
-fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+docker compose build --no-cache
+docker compose up -d
 ```
 
-大内存服务器想提性能：改 `Dockerfile` 里的 `innodb_buffer_pool_size`、`pm.max_children`、
-`memory_limit`，然后 `docker compose build --no-cache && docker compose up -d`。
+Alpine 更新可能带来 MariaDB 版本变化。已有数据库的数据目录需要符合 MariaDB 的升级要求，跨不兼容版本时使用逻辑导出、导入迁移。
+
+## 日常操作
+
+```bash
+# 查看状态与日志：Nginx、PHP-FPM、MariaDB 均输出到容器日志
+docker compose ps
+docker compose logs -f app
+
+# 停止、启动、重启已有容器
+docker compose stop
+docker compose start
+docker compose restart app
+
+# 应用 Compose 配置变更；修改环境变量后不能只执行 restart
+docker compose up -d
+
+# 修改 Dockerfile 或入口脚本后重建
+docker compose up -d --build
+
+# nginx.conf 是只读挂载，修改后重启生效
+docker compose restart app
+
+# 使用容器内 root 的 Unix socket 认证进入数据库
+docker compose exec app mariadb --protocol=socket -u root btcloud
+```
+
+修改数据库密码时，需要同时修改 Compose 的 `MYSQL_PASSWORD` 和 `data/btcloud/.env` 中的应用密码，然后执行 `docker compose up -d`。初始化 SQL 使用密码哈希，不将明文密码拼接进 SQL。
+
+停止时先终止插件同步任务（如果已开启），再让 Nginx 完成现有请求、停止 PHP-FPM，最后停止 MariaDB。请求最长执行时间为 600 秒，容器停止宽限期为 11 分钟；没有正在执行的请求时通常不需要等待这么久。
+
+PHP-FPM 按需启动，最多两个 worker，每个请求的 PHP 内存限制为 256M；MariaDB 的 InnoDB 缓冲池为 64M。实际峰值内存仍取决于业务请求和并发量，不能把空闲占用当作容量保证。
 
 ## 备份与迁移
 
-全部数据都在 `./data`（源码 + 插件包 + 密钥 + 数据库），打包这一个目录就是完整备份：
+停止容器后备份 `data` 和部署配置，保证数据库数据文件一致：
 
 ```bash
-cd /root/btcloud
-docker compose stop          # 停库落盘，保证数据一致
-tar czf btcloud-backup-$(date +%Y%m%d).tar.gz data
+docker compose stop
+tar czf btcloud-backup-$(date +%Y%m%d-%H%M%S).tar.gz \
+    data Dockerfile docker-compose.yml docker-entrypoint.sh start.sh nginx.conf .dockerignore
 docker compose start
 ```
 
-换服务器：新机器装好 Docker → 上传项目文件（第 1 步那几个）+ 解压 `data` 目录 →
-`docker compose up -d --build`，起来就是原样，宝塔那边照第 5 步配一下反代即可。
-
-也可以只做数据库的逻辑备份（在线执行，不用停容器）：
+数据库逻辑备份示例（示例库名为 `btcloud`）：
 
 ```bash
-docker compose exec app mariadb-dump -u root btcloud > btcloud-$(date +%Y%m%d).sql
+docker compose exec -T app mariadb-dump --single-transaction -u root btcloud > btcloud.sql
 ```
 
-## 自动更新 btcloud（可选）
-
-`update-btcloud.sh`（已打进镜像）会定时检查 [GitHub Releases](https://github.com/flucont/btcloud/releases)
-有没有发新版，发现新版时自动完成官方升级流程：
-
-1. 下载新版 Release 包
-2. 按官方要求**覆盖除 `data` 文件夹外的全部文件**（插件包、密钥、数据库都不受影响）
-3. 执行官方替换命令 `convert.sh`，把包内的 `http://www.example.com` 替换成你的站点域名
-
-全部配置都在 `docker-compose.yml` 的 `environment` 里：
-
-```yaml
-environment:
-  BTCLOUD_DOMAIN: "https://bt.example.com"   # 改成你的站点域名（替换域名时用）
-  AUTO_UPDATE: "true"                        # 开启自动更新
-  UPDATE_INTERVAL: "86400"                   # 检查新版本间隔（秒），默认 24 小时
-```
-
-开启后 `docker compose up -d` 重建容器即可：容器每次启动约 10 秒后检查一次，之后每隔
-`UPDATE_INTERVAL` 重复。已安装的版本号记录在 `./data/btcloud/data/.release-tag`；首次运行时
-该标记不存在，会直接按最新版覆盖一次（等于把当前部署对齐到最新 Release）。脚本内置并发锁，
-更新失败不影响站点运行，下个周期自动重试。
-
-```bash
-# 手动触发一次检查/更新（无论 AUTO_UPDATE 是否开启都可以）
-docker compose exec app update-btcloud.sh
-
-# 看更新日志（输出在容器日志里，带 [update] 前缀）
-docker compose logs -f app
-```
-
-> 需要服务器能访问 github.com；新版包 200MB+，下载耗时视网络而定。
-> 升级完成后如需拉取最新插件列表，仍按官方说明到后台「定时任务设置」操作。
-
-## btcloud 手动升级
-
-开启上面的 `AUTO_UPDATE` 后这些步骤会自动完成；不想自动更新的可以手动做。
-按官方要求：**覆盖除 btcloud 内部的 `data` 文件夹外的全部文件**。
-
-> ⚠️ 注意区分：`./data/btcloud` 是挂载给容器的源码目录；`./data/btcloud/data/`
-> 才是 btcloud 内部存插件包/密钥的目录（升级时要保留的就是它）。
-
-```bash
-cd /root/btcloud
-
-# 1. 备份 btcloud 内部 data
-mkdir -p backup
-tar czf backup/btcloud-data-$(date +%Y%m%d).tar.gz -C data/btcloud data
-
-# 2. 备份数据库
-docker compose exec app mariadb-dump -u root btcloud > backup/btcloud-db-$(date +%Y%m%d).sql
-
-# 3. 下载新版 zip 到项目目录（如 btcloud_3.9.zip），覆盖解压（排除内部 data）
-unzip -o btcloud_3.9.zip -d data/btcloud -x "data/*"
-
-# 4. 重启容器（触发 entrypoint 修权限）
-docker compose restart app
-
-# 5. 到浏览器后台执行：批量替换工具 → 获取最新插件列表 → 修改版本号
-
-# 6. （可选）同步版本标记，避免 AUTO_UPDATE 下个周期重复覆盖同一版本
-echo "3.9" > data/btcloud/data/.release-tag
-```
-
-## 从旧版部署迁移（外部宝塔 MySQL → 内置 MariaDB）
-
-之前用"宝塔 MySQL + `./data` 直接放源码"的老布局，一次性迁移：
-
-```bash
-cd /root/btcloud
-
-# 1. 导出旧数据库（宝塔面板备份，或命令行）
-mysqldump -ubtcloud -p btcloud > btcloud-old.sql
-
-# 2. 停容器，调整目录结构: ./data → ./data/btcloud
-docker compose down
-mkdir btcloud-tmp && mv data btcloud-tmp/btcloud && mv btcloud-tmp data
-mkdir -p data/mysql
-
-# 3. 更新本项目文件（compose/Dockerfile 等）后重建启动
-docker compose up -d --build
-
-# 4. 导入数据到内置 MariaDB
-docker compose exec -T app mariadb -u root btcloud < btcloud-old.sql
-
-# 5. 改 btcloud 的数据库连接配置
-vi data/btcloud/.env
-#   HOSTNAME = 127.0.0.1
-#   DATABASE / USERNAME / PASSWORD 改成 compose 里 MYSQL_* 的值
-docker compose restart app
-```
-
-确认一切正常后，宝塔的 MySQL 里那份旧库可以删掉，`bind-address` 也可以改回 `127.0.0.1`。
-
----
-
-## 常见问题
-
-### 1. 502 Bad Gateway（宝塔那边）
-- 容器没起来：`docker compose ps` 看 btcloud 是否 Up
-- 端口没通：`curl -I http://127.0.0.1:8080` 应该有响应
-- 宝塔配置错了：确认反代目标是 `http://127.0.0.1:8080`
-
-### 2. 502 Bad Gateway（容器内 Nginx 日志里）
-- php-fpm 挂了。正常情况下 `start.sh` 会让整个容器退出并自动重启，
-  若反复 502 先看日志找原因：`docker compose logs -f app`
-
-### 3. File not found. / No input file specified.
-- `./data/btcloud/public/index.php` 不存在，检查是否解压正确
-- 容器里看不到：`docker compose exec app ls /var/www/html/public/`
-
-### 4. 权限错误（Permission denied）
-```bash
-# 重启容器，entrypoint 检测到属主不对会自动修复
-docker compose restart app
-# 或手动修复
-docker compose exec app chown -R www-data:www-data /var/www/html
-```
-
-### 5. SQLSTATE[HY000] [2002] Connection refused
-- MariaDB 没起来或还在初始化：`docker compose logs -f app` 查 `[ERROR]` 或初始化报错
-- 数据目录权限不对：重启容器让 entrypoint 自动修（`docker compose restart app`）
-- 安装向导里数据库主机必须填 `127.0.0.1`（不要填 `localhost`）
-
-### 6. SQLSTATE[HY000] [1045] Access denied
-- 密码和 compose 里 `MYSQL_PASSWORD` 不一致；改好后 `docker compose restart app`
-  会自动把数据库密码同步成环境变量的值
-- 已安装过的还要检查 `data/btcloud/.env` 里的 `PASSWORD` 是否同步修改
-
-### 7. 上传大文件超时
-- PHP 里已配 1024M
-- 内部 Nginx `client_max_body_size 1024M`
-- **宝塔 Nginx 反代也要加**：`client_max_body_size 1024M`（见步骤 5 配置）
-
-### 8. 无法获取真实客户端 IP（后台看到的都是 127.0.0.1）
-- 宝塔 Nginx 反代已经通过 `X-Real-IP` / `X-Forwarded-For` 传了
-- Docker 内部 Nginx 的 `nginx.conf` 已配置 `set_real_ip_from 127.0.0.1;`
-- 若 btcloud 应用层还是拿不到，可能需要配置 `TRUSTED_PROXIES` 相关
-
-### 9. 8080 端口被占用
-- 改 `docker-compose.yml` 里 `ports` 的宿主机端口，如 `"127.0.0.1:8081:80"`
-- 同步改宝塔反代目标为 `http://127.0.0.1:8081`
-- `docker compose up -d`
-
----
-
-## 安全建议
-
-1. 内置 MariaDB 只监听容器内 `127.0.0.1`，且未映射端口——宿主机和公网都无法直连，无需额外加固
-2. `docker-compose.yml` 中内部 Nginx 端口已限制在 `127.0.0.1`，公网只能通过宝塔 Nginx 访问
-3. `MYSQL_PASSWORD` 务必改成强密码（虽然数据库不对外，纵深防御总没错）
-4. 站点开启 HTTPS
-5. 定期备份整个 `./data` 目录（见「备份与迁移」）
-
-## 参考
-
-- 项目主页：https://github.com/flucont/btcloud
-- Release 下载：https://github.com/flucont/btcloud/releases
+迁移时还原项目文件和 `data` 目录，确认目标运行环境与数据库版本兼容，再执行 `docker compose up -d --build` 并配置宝塔反代。
