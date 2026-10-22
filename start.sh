@@ -34,7 +34,8 @@ shutdown() {
 trap shutdown EXIT
 trap 'exit 0' TERM INT QUIT
 
-mariadbd --user=mysql &
+# 覆盖 Alpine 默认的 skip-networking；监听地址仍由配置限制为 127.0.0.1。
+mariadbd --user=mysql --skip-networking=0 &
 pids+=("$!")
 names+=(MariaDB)
 signals+=(TERM)
